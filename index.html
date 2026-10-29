@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Notes MD</title>
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <div class="side-head">
+          <button id="vault-btn" class="vault-btn" title="Open a folder as vault">
+            <span id="vault-name">Open vault…</span>
+          </button>
+          <button id="theme-btn" class="icon-btn" title="Theme: system"></button>
+        </div>
+        <nav class="side-scroll">
+          <div class="section-title">
+            <span>Folders</span>
+            <button id="new-folder-btn" class="icon-btn small" title="New folder">+</button>
+          </div>
+          <div id="tree"></div>
+          <div class="section-title">
+            <span>Tags</span>
+            <button id="tags-menu-btn" class="icon-btn small" title="Tag options">⋯</button>
+          </div>
+          <div id="tags"></div>
+        </nav>
+      </aside>
+      <div class="resizer" data-var="--side-w"></div>
+
+      <section id="list-pane">
+        <div class="list-head">
+          <input id="search" type="search" placeholder="Search…   #tag to filter" spellcheck="false" />
+          <button id="new-note-btn" class="icon-btn" title="New note (Ctrl+N)">+</button>
+        </div>
+        <div id="list-title" class="list-title"></div>
+        <div id="note-list"></div>
+      </section>
+      <div class="resizer" data-var="--list-w"></div>
+
+      <main id="editor-pane">
+        <div class="editor-head">
+          <div id="note-path" class="note-path"></div>
+          <span id="save-state" class="save-state"></span>
+          <div class="seg" id="mode-seg">
+            <button data-mode="edit">Edit</button>
+            <button data-mode="split">Split</button>
+            <button data-mode="preview">Preview</button>
+          </div>
+        </div>
+        <div id="tag-bar" class="tag-bar" hidden>
+          <span id="tag-chips"></span>
+          <input id="tag-input" class="tag-input" list="tag-options" placeholder="+ Add tag" spellcheck="false" autocomplete="off" title="Add tags (Ctrl+T) — Enter or comma to add" />
+          <datalist id="tag-options"></datalist>
+        </div>
+        <div id="format-bar" class="format-bar" role="toolbar" aria-label="Formatting" hidden>
+          <button data-cmd="undo" title="Undo (Ctrl+Z)"><svg viewBox="0 0 16 16"><path d="M5.5 3.5 2.5 6.5l3 3M3 6.5h6.5a4 4 0 0 1 0 8H7"/></svg></button>
+          <button data-cmd="redo" title="Redo (Ctrl+Y)"><svg viewBox="0 0 16 16"><path d="m10.5 3.5 3 3-3 3M13 6.5H6.5a4 4 0 0 0 0 8H9"/></svg></button>
+          <span class="sep"></span>
+          <button data-cmd="h1" title="Heading 1" class="txt">H1</button>
+          <button data-cmd="h2" title="Heading 2" class="txt">H2</button>
+          <button data-cmd="h3" title="Heading 3" class="txt">H3</button>
+          <span class="sep"></span>
+          <button data-cmd="bold" title="Bold (Ctrl+B)" class="txt"><b>B</b></button>
+          <button data-cmd="italic" title="Italic (Ctrl+I)" class="txt"><i>I</i></button>
+          <button data-cmd="strike" title="Strikethrough" class="txt"><s>S</s></button>
+          <button data-cmd="code" title="Inline code"><svg viewBox="0 0 16 16"><path d="M5.5 4.5 2 8l3.5 3.5M10.5 4.5 14 8l-3.5 3.5"/></svg></button>
+          <span class="sep"></span>
+          <button data-cmd="ul" title="Bulleted list"><svg viewBox="0 0 16 16"><path d="M6 4h8M6 8h8M6 12h8"/><circle cx="2.8" cy="4" r=".9" class="fill"/><circle cx="2.8" cy="8" r=".9" class="fill"/><circle cx="2.8" cy="12" r=".9" class="fill"/></svg></button>
+          <button data-cmd="ol" title="Numbered list"><svg viewBox="0 0 16 16"><path d="M6.5 4h7.5M6.5 8h7.5M6.5 12h7.5M2.2 2.8l1-.6v3.3M1.8 9.3c.2-.6.7-.9 1.2-.9.6 0 1 .4 1 .9 0 .8-2.2 1.6-2.2 2.3H4"/></svg></button>
+          <button data-cmd="task" title="Checklist"><svg viewBox="0 0 16 16"><rect x="1.8" y="2.8" width="4" height="4" rx=".8"/><path d="m2.6 11.6 1 1 1.8-2.2M8 4.8h6M8 11.5h6"/></svg></button>
+          <button data-cmd="quote" title="Quote"><svg viewBox="0 0 16 16"><path d="M3 3v10M6.5 5h7M6.5 8h7M6.5 11h5"/></svg></button>
+          <button data-cmd="codeblock" title="Code block"><svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="m6 6.5-1.8 1.7L6 10M10 6.5l1.8 1.7L10 10"/></svg></button>
+          <span class="sep"></span>
+          <button data-cmd="link" title="Link"><svg viewBox="0 0 16 16"><path d="M7 9a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2L8.5 3.3M9 7a3 3 0 0 0-4.2 0L2.5 9.3a3 3 0 0 0 4.2 4.2l.8-.8"/></svg></button>
+          <button data-cmd="image" title="Image"><svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><circle cx="5.5" cy="6" r="1.2"/><path d="m1.8 12 4-3.8 3 2.6 2-1.6 3.4 3"/></svg></button>
+          <button data-cmd="table" title="Table"><svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M1.5 6.2h13M1.5 9.8h13M6 6.2v7.3M10.2 6.2v7.3"/></svg></button>
+          <button data-cmd="rule" title="Horizontal line"><svg viewBox="0 0 16 16"><path d="M1.5 8h13"/></svg></button>
+          <span class="grow"></span>
+          <button data-cmd="find" title="Find &amp; replace (Ctrl+F / Ctrl+H)"><svg viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.3"/><path d="m10.2 10.2 3.8 3.8"/></svg></button>
+        </div>
+        <div id="notice" class="notice" hidden></div>
+        <div id="editor-body" class="mode-split">
+          <div id="editor"></div>
+          <article id="preview" class="markdown"></article>
+        </div>
+        <div id="empty" class="empty"></div>
+      </main>
+    </div>
+    <div id="menu" class="menu" hidden></div>
+    <div id="modal" class="modal" hidden>
+      <form id="modal-form" class="modal-box">
+        <label id="modal-label" for="modal-input"></label>
+        <input id="modal-input" spellcheck="false" autocomplete="off" />
+        <div class="modal-actions">
+          <button type="button" id="modal-cancel">Cancel</button>
+          <button type="submit" class="primary">OK</button>
+        </div>
+      </form>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

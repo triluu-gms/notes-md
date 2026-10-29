@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permissions for the main window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-set-theme",
+    "core:window:allow-destroy",
+    "dialog:allow-open",
+    "dialog:allow-ask",
+    "opener:allow-open-url"
+  ]
+}

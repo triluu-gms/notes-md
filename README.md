@@ -21,9 +21,13 @@ Built with [Tauri 2](https://tauri.app) (Rust + WebView2): ~5–10 MB installer,
 - **Tag options** (`⋯` next to *Tags* in the sidebar):
   - *Detect #tags in note text* — per-vault switch. Turn it off when notes contain shell sessions
     (`#cd /etc` root prompts) so only front-matter tags count.
-  - *Import QOwnNotes tags* — QOwnNotes keeps tags in `notes.sqlite`, not in the `.md` files. This copies each
-    note's tags into its front matter (names with spaces become `cisco-vpn-client`), backs up every changed
-    file to `%APPDATA%\com.notesmd.app\backups\`, keeps file modified dates, and never writes `notes.sqlite`.
+- **Import from Evernote and Joplin** (`⋯` next to the vault name, or right-click a folder → *Import … here*):
+  - *Evernote* `.enex` (pick one or more): each file becomes a notebook folder; notes are converted from
+    Evernote's HTML to Markdown (headings, bold/italic, lists, checklists, tables, code blocks, links).
+  - *Joplin* `.jex`: the notebook tree becomes folders; links between notes are kept.
+  - Tags, created/updated dates, source URL and author go into front matter; files keep the note's
+    updated date. Images and attachments are saved to `_resources/` and linked. Existing files are never
+    overwritten — name clashes get ` (1)`.
 - **Full-text search** (SQLite FTS5, prefix matching, diacritics-insensitive). Mix in `#tag` to filter:
   `meeting #work`.
 - **Editor + live preview** (CodeMirror 6 + GFM): Edit / Split / Preview, autosave, `[[wikilinks]]`,

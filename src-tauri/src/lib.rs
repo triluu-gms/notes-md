@@ -1,6 +1,8 @@
+mod html2md;
+mod import;
 mod index;
 mod parse;
-mod qownnotes;
+mod xml;
 
 use index::{Changes, Folder, Index, NoteMeta, TagCount};
 use notify_debouncer_mini::notify::{RecommendedWatcher, RecursiveMode};
@@ -120,14 +122,28 @@ fn sync(v: &mut Vault) -> Res<Changes> {
 
 // ---------------- commands ----------------
 
-#[tauri::command]
-fn last_vault(app: AppHandle) -> Option<String> {
-    load_config(&app).last_vault.filter(|p| Path::new(p).is_dir())
-}
+// The UI never passes a vault path: a vault is only the folder the user picked in the dialog (or the last one
+// they picked), so script in the webview cannot widen file access to an arbitrary folder.
 
 #[tauri::command]
-async fn open_vault(app: AppHandle, state: State<'_, AppState>, path: String) -> Res<VaultInfo> {
-    load_vault(&app, &state, path)
+async fn open_last_vault(app: AppHandle, state: State<'_, AppState>) -> Res<Option<VaultInfo>> {
+    match load_config(&app).last_vault.filter(|p| Path::new(p).is_dir()) {
+        Some(path) => load_vault(&app, &state, path).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Shows the folder dialog and opens the chosen folder. None when the user cancels.
+#[tauri::command]
+async fn pick_vault(app: AppHandle, state: State<'_, AppState>) -> Res<Option<VaultInfo>> {
+    use tauri_plugin_dialog::DialogExt;
+    let mut dialog = app.dialog().file().set_title("Choose a folder for your notes");
+    if let Some(w) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&w);
+    }
+    let Some(dir) = dialog.blocking_pick_folder() else { return Ok(None) };
+    let path = dir.into_path().map_err(err)?.to_string_lossy().into_owned();
+    load_vault(&app, &state, path).map(Some)
 }
 
 fn load_vault(app: &AppHandle, state: &AppState, path: String) -> Res<VaultInfo> {
@@ -217,21 +233,11 @@ fn edit_tags(state: State<AppState>, content: String, op: String, tag: String, n
 #[serde(rename_all = "camelCase")]
 struct VaultSettings {
     inline_tags: bool,
-    /// Present when the vault has a QOwnNotes database with tags: (notes, distinct tags).
-    qownnotes: Option<(usize, usize)>,
 }
 
 #[tauri::command]
 fn vault_settings(state: State<AppState>) -> Res<VaultSettings> {
-    with_vault(&state, |v| {
-        let qon = qownnotes::read(&v.root).ok().flatten().filter(|m| !m.is_empty()).map(|m| {
-            let mut names: Vec<_> = m.values().flatten().map(|t| t.to_lowercase()).collect();
-            names.sort();
-            names.dedup();
-            (m.len(), names.len())
-        });
-        Ok(VaultSettings { inline_tags: v.inline, qownnotes: qon })
-    })
+    with_vault(&state, |v| Ok(VaultSettings { inline_tags: v.inline }))
 }
 
 #[tauri::command]
@@ -247,85 +253,50 @@ async fn set_inline_tags(app: AppHandle, state: State<'_, AppState>, enabled: bo
     load_vault(&app, &state, root).map(|_| ())
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ImportReport {
-    notes_updated: usize,
-    tags_added: usize,
-    /// Notes QOwnNotes knows about that are not in the folder.
-    missing: Vec<String>,
-    /// Tag names that had to change to be valid tags: (QOwnNotes name, new tag).
-    renamed: Vec<(String, String)>,
-    backup_dir: String,
-}
-
-/// Copy QOwnNotes tags (from notes.sqlite) into each note's front matter. Every changed file is backed up
-/// first and keeps its original modified time.
+/// Ask for Evernote (`.enex`, several allowed) or Joplin (`.jex`) export files and import them into
+/// `dest_folder`. Returns None when the file dialog is cancelled.
 #[tauri::command]
-async fn import_qownnotes(app: AppHandle, state: State<'_, AppState>) -> Res<ImportReport> {
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let backup = app.path().app_data_dir().map_err(err)?.join("backups").join(format!("qownnotes-import-{stamp}"));
-    with_vault(&state, |v| {
-        let links = qownnotes::read(&v.root)
-            .map_err(err)?
-            .ok_or("This folder has no QOwnNotes database (notes.sqlite)")?;
-        let mut report = ImportReport {
-            notes_updated: 0,
-            tags_added: 0,
-            missing: Vec::new(),
-            renamed: Vec::new(),
-            backup_dir: backup.display().to_string(),
-        };
-        for (rel, names) in links {
-            let full = match resolve(&v.root, &rel) {
-                Ok(p) if p.is_file() => p,
-                _ => {
-                    report.missing.push(rel);
-                    continue;
-                }
+async fn import_notes(app: AppHandle, kind: String, dest_folder: String) -> Res<Option<import::Report>> {
+    use tauri_plugin_dialog::DialogExt;
+    let mut dialog = app.dialog().file().set_title("Choose export file to import");
+    if let Some(w) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&w);
+    }
+    let files: Vec<PathBuf> = match kind.as_str() {
+        "evernote" => dialog
+            .add_filter("Evernote export (.enex)", &["enex"])
+            .blocking_pick_files()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|f| f.into_path().ok())
+            .collect(),
+        "joplin" => dialog
+            .add_filter("Joplin export (.jex)", &["jex"])
+            .blocking_pick_file()
+            .and_then(|f| f.into_path().ok())
+            .into_iter()
+            .collect(),
+        _ => return Err(format!("Unknown import type: {kind}")),
+    };
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app2.state::<AppState>();
+        with_vault(&state, |v| {
+            let dest = resolve(&v.root, &dest_folder)?;
+            fs::create_dir_all(&dest).map_err(err)?;
+            let report = match kind.as_str() {
+                "evernote" => import::evernote(&v.root, &dest_folder, &files)?,
+                _ => import::joplin(&v.root, &dest_folder, &files[0])?,
             };
-            let tags: Vec<String> = names
-                .iter()
-                .filter_map(|n| {
-                    let t = parse::sanitize_tag(n)?;
-                    if t != n.to_lowercase() && !report.renamed.iter().any(|(o, _)| o == n) {
-                        report.renamed.push((n.clone(), t.clone()));
-                    }
-                    Some(t)
-                })
-                .collect();
-
-            let bytes = fs::read(&full).map_err(err)?;
-            let Ok(original) = String::from_utf8(bytes.clone()) else {
-                report.missing.push(format!("{rel} (not UTF-8, skipped)"));
-                continue;
-            };
-            let mut content = original.clone();
-            for t in tags {
-                content = parse::edit_tags(&content, &parse::TagOp::Add(t), v.inline);
-            }
-            if content == original {
-                continue;
-            }
-            let modified = fs::metadata(&full).and_then(|m| m.modified()).ok();
-            let bk = backup.join(&rel);
-            fs::create_dir_all(bk.parent().unwrap()).map_err(err)?;
-            fs::write(&bk, &bytes).map_err(err)?;
-            fs::write(&full, &content).map_err(err)?;
-            if let Some(m) = modified {
-                if let Ok(f) = fs::File::options().write(true).open(&full) {
-                    let _ = f.set_modified(m);
-                }
-            }
-            report.notes_updated += 1;
-            report.tags_added += parse::parse("", &content, v.inline)
-                .tags
-                .len()
-                .saturating_sub(parse::parse("", &original, v.inline).tags.len());
-        }
-        sync(v)?;
-        Ok(report)
+            sync(v)?;
+            Ok(Some(report))
+        })
     })
+    .await
+    .map_err(err)?
 }
 
 #[tauri::command]
@@ -442,22 +413,14 @@ fn delete_item(state: State<AppState>, path: String) -> Res<()> {
     })
 }
 
+/// Shows the item selected in the system file manager (no command line is built from the path).
 #[tauri::command]
 fn reveal(state: State<AppState>, path: String) -> Res<()> {
-    with_vault(&state, |v| {
-        let full = resolve(&v.root, &path)?;
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            std::process::Command::new("explorer")
-                .raw_arg(format!("/select,\"{}\"", full.display()))
-                .spawn()
-                .map_err(err)?;
-        }
-        #[cfg(not(windows))]
-        let _ = full;
-        Ok(())
-    })
+    let full = with_vault(&state, |v| resolve(&v.root, &path))?;
+    if !full.exists() {
+        return Err(format!("Not found: {path}"));
+    }
+    tauri_plugin_opener::reveal_item_in_dir(full).map_err(err)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -467,8 +430,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
-            last_vault,
-            open_vault,
+            open_last_vault,
+            pick_vault,
             get_tree,
             get_tags,
             list_notes,
@@ -477,7 +440,7 @@ pub fn run() {
             edit_tags,
             vault_settings,
             set_inline_tags,
-            import_qownnotes,
+            import_notes,
             read_note,
             save_note,
             create_note,

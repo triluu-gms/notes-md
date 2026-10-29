@@ -21,6 +21,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 notify-debouncer-mini = "0.5"
 walkdir = "2"
 trash = "5"
+tar = "0.4"
+base64 = "0.22"
+md-5 = "0.10"
 
 [profile.release]
 codegen-units = 1

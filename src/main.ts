@@ -1,7 +1,7 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open as openDialog, ask } from "@tauri-apps/plugin-dialog";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { EditorState, Prec } from "@codemirror/state";
 import { EditorView, keymap, drawSelection, highlightActiveLine, placeholder } from "@codemirror/view";
@@ -431,28 +431,16 @@ el.tagChips.addEventListener("click", (e) => {
   else setFilter({ kind: "tag", tag });
 });
 
-// ---------- tag options: inline #tags switch, QOwnNotes import ----------
-type VaultSettings = { inlineTags: boolean; qownnotes: [number, number] | null };
-type ImportReport = {
-  notesUpdated: number;
-  tagsAdded: number;
-  missing: string[];
-  renamed: [string, string][];
-  backupDir: string;
-};
+// ---------- tag options: inline #tags switch ----------
+type VaultSettings = { inlineTags: boolean };
 
 $("tags-menu-btn").addEventListener("click", async (e) => {
   if (!S.vault) return;
   const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
   const settings = await call<VaultSettings>("vault_settings");
-  const items: MenuItem[] = [
+  showMenu(r.left, r.bottom + 4, [
     [`${settings.inlineTags ? "✓" : "  "}  Detect #tags in note text`, () => setInlineTags(!settings.inlineTags)],
-  ];
-  if (settings.qownnotes) {
-    const [notes, tags] = settings.qownnotes;
-    items.push("-", [`Import ${tags} QOwnNotes tags (${notes} notes)…`, () => importQownnotes(notes)]);
-  }
-  showMenu(r.left, r.bottom + 4, items);
+  ]);
 });
 
 async function setInlineTags(enabled: boolean) {
@@ -467,36 +455,48 @@ async function setInlineTags(enabled: boolean) {
   await loadCurrentTags();
 }
 
-async function importQownnotes(notes: number) {
-  const ok = await ask(
-    `Copy the QOwnNotes tags into the front matter (tags: […]) of ${notes} notes?\n\n` +
-      `Each changed file is backed up first and keeps its original modified date. QOwnNotes' own database is not changed.`,
-    { title: "Import QOwnNotes tags", kind: "info" },
-  );
-  if (!ok) return;
+// ---------- vault menu: open vault, import from Evernote / Joplin ----------
+type ImportReport = {
+  notes: number;
+  notebooks: number;
+  attachments: number;
+  tags: number;
+  skipped: string[];
+  folder: string;
+};
+type ImportKind = "evernote" | "joplin";
+
+const importItems = (folder: string): [string, () => void][] => [
+  ["Import from Evernote (.enex)…", () => importNotes("evernote", folder)],
+  ["Import from Joplin (.jex)…", () => importNotes("joplin", folder)],
+];
+
+$("vault-menu-btn").addEventListener("click", (e) => {
+  const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  const items: MenuItem[] = [["Open vault folder…", pickVault]];
+  if (S.vault) items.push("-", ...importItems(currentFolder()));
+  showMenu(r.left, r.bottom + 4, items);
+});
+
+async function importNotes(kind: ImportKind, folder: string) {
+  if (!S.vault) return;
   await save();
   el.vaultName.textContent = "Importing…";
-  let rep: ImportReport;
+  let rep: ImportReport | null;
   try {
-    rep = await call<ImportReport>("import_qownnotes");
+    rep = await call<ImportReport | null>("import_notes", { kind, destFolder: folder });
   } finally {
-    el.vaultName.textContent = S.vault!.name;
+    el.vaultName.textContent = S.vault.name;
   }
+  if (!rep) return; // dialog cancelled
   await refresh();
-  if (S.current) {
-    // Show the imported tags in the open note without waiting for the file watcher.
-    const disk = await call<string>("read_note", { path: S.current });
-    if (!S.dirty && disk !== S.saved) {
-      S.saved = disk;
-      setDoc(disk, true);
-    }
-    S.currentTags = [];
-    await loadCurrentTags();
-  }
-  const parts = [`Imported ${rep.tagsAdded} tags into ${rep.notesUpdated} notes.`];
-  if (rep.renamed.length) parts.push(`Renamed to valid tags: ${rep.renamed.map(([a, b]) => `"${a}" → #${b}`).join(", ")}.`);
-  if (rep.missing.length) parts.push(`Not found: ${rep.missing.length} note(s).`);
-  parts.push(`Backup: ${rep.backupDir}`);
+  setFilter(rep.folder ? { kind: "folder", path: rep.folder } : { kind: "all" });
+  const where = rep.folder || S.vault.name;
+  const parts = [
+    `Imported ${rep.notes} notes from ${rep.notebooks} notebook${rep.notebooks === 1 ? "" : "s"} into "${where}"`,
+    `with ${rep.attachments} attachment${rep.attachments === 1 ? "" : "s"} and ${rep.tags} tag${rep.tags === 1 ? "" : "s"}.`,
+  ];
+  if (rep.skipped.length) parts.push(`Skipped ${rep.skipped.length}: ${rep.skipped.slice(0, 3).join("; ")}${rep.skipped.length > 3 ? "…" : ""}`);
   el.notice.className = "notice";
   el.notice.textContent = parts.join(" ");
   el.notice.hidden = false;
@@ -717,17 +717,22 @@ async function deleteItem(path: string, isFolder: boolean) {
 }
 
 // ---------- vault ----------
-async function pickVault() {
-  const dir = await openDialog({ directory: true, title: "Choose a folder for your notes" });
-  if (typeof dir === "string") await openVault(dir);
-}
+const pickVault = () => openVault("pick_vault");
 el.vaultBtn.onclick = pickVault;
 
-async function openVault(path: string) {
+/** The backend chooses the folder (dialog or last vault); the UI never sends a vault path. */
+async function openVault(cmd: "pick_vault" | "open_last_vault") {
   await save();
+  const prevName = el.vaultName.textContent;
   el.vaultName.textContent = "Indexing…";
   try {
-    S.vault = await invoke<VaultInfo>("open_vault", { path });
+    const info = await invoke<VaultInfo | null>(cmd);
+    if (!info) {
+      el.vaultName.textContent = prevName;
+      if (!S.vault) showEditor(false);
+      return;
+    }
+    S.vault = info;
   } catch (e) {
     S.vault = null;
     el.vaultName.textContent = "Open vault…";
@@ -1015,6 +1020,8 @@ document.addEventListener("contextmenu", (e) => {
     const items: MenuItem[] = [
       ["New note", () => newNote(p)],
       ["New folder", () => newFolder(p)],
+      "-",
+      ...importItems(p).map(([label, fn]): MenuItem => [label.replace("…", " here…"), fn]),
     ];
     if (!folderItem.dataset.all)
       items.push("-", ["Rename…", () => renameItem(p, true)], ["Delete", () => deleteItem(p, true)]);
@@ -1150,4 +1157,4 @@ getCurrentWindow().onCloseRequested(async () => {
 // ---------- boot ----------
 setMode(S.mode);
 showEditor(false);
-invoke<string | null>("last_vault").then((p) => (p ? openVault(p) : showEditor(false)));
+openVault("open_last_vault");

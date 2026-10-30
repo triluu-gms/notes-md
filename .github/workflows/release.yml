@@ -49,21 +49,25 @@ jobs:
         include:
           - name: Windows x64
             os: windows-latest
-            files: src-tauri/target/release/bundle/nsis/*.exe
+            # One glob per line (upload-artifact needs a newline-separated list).
+            files: |
+              src-tauri/target/release/bundle/nsis/*.exe
           # Oldest supported Ubuntu, so the .deb/.rpm/AppImage also run on older distros (glibc).
           - name: Linux x64
             os: ubuntu-22.04
-            files: >-
+            files: |
               src-tauri/target/release/bundle/deb/*.deb
               src-tauri/target/release/bundle/rpm/*.rpm
               src-tauri/target/release/bundle/appimage/*.AppImage
     runs-on: ${{ matrix.os }}
+    env:
+      FILES: ${{ matrix.files }}
     defaults:
       run:
         shell: bash
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -72,7 +76,7 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev librsvg2-dev \
             libayatana-appindicator3-dev build-essential file patchelf
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: lts/*
           cache: npm
@@ -111,10 +115,10 @@ jobs:
         run: npm run tauri build
 
       - name: List built files
-        run: ls -la ${{ matrix.files }}
+        run: ls -la $FILES # unquoted on purpose: each line is a glob
 
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: notes-md-${{ runner.os }}
           path: ${{ matrix.files }}
@@ -124,4 +128,4 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$GITHUB_REF_NAME" ${{ matrix.files }} --repo "$GITHUB_REPOSITORY" --clobber
+        run: gh release upload "$GITHUB_REF_NAME" $FILES --repo "$GITHUB_REPOSITORY" --clobber

@@ -279,8 +279,23 @@ fn escape_like(s: &str) -> String {
     s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
 }
 
+/// Folders never scanned: dot-folders, `node_modules`, and Windows system folders such as `$RECYCLE.BIN`.
 pub fn is_hidden(name: &str) -> bool {
-    name.starts_with('.') || name == "node_modules"
+    name.starts_with('.')
+        || name.starts_with('$')
+        || name == "node_modules"
+        || name.eq_ignore_ascii_case("System Volume Information")
+}
+
+/// Count files and folders under `root` (skipping hidden ones), stopping as soon as `limit` is passed.
+/// Returns false when the folder is too big to be a notes vault.
+pub fn within_size(root: &Path, limit: usize) -> bool {
+    WalkDir::new(root)
+        .into_iter()
+        .filter_entry(|e| e.depth() == 0 || !is_hidden(&e.file_name().to_string_lossy()))
+        .take(limit + 1)
+        .count()
+        <= limit
 }
 
 fn mtime_ms(m: &fs::Metadata) -> i64 {

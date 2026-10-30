@@ -127,8 +127,13 @@ fn sync(v: &mut Vault) -> Res<Changes> {
 
 #[tauri::command]
 async fn open_last_vault(app: AppHandle, state: State<'_, AppState>) -> Res<Option<VaultInfo>> {
-    match load_config(&app).last_vault.filter(|p| Path::new(p).is_dir()) {
-        Some(path) => load_vault(&app, &state, path).map(Some),
+    let mut cfg = load_config(&app);
+    match cfg.last_vault.clone().filter(|p| Path::new(p).is_dir()) {
+        Some(path) => load_vault(&app, &state, path).map(Some).inspect_err(|_| {
+            // Don't fail the same way on every start.
+            cfg.last_vault = None;
+            save_config(&app, &cfg);
+        }),
         None => Ok(None),
     }
 }
@@ -146,11 +151,49 @@ async fn pick_vault(app: AppHandle, state: State<'_, AppState>) -> Res<Option<Va
     load_vault(&app, &state, path).map(Some)
 }
 
+/// Most files + folders a vault may contain. Real note collections are far below this; a drive or a
+/// system folder is far above it, and scanning one would freeze the app.
+const MAX_VAULT_ENTRIES: usize = 100_000;
+
+/// Refuse folders that cannot sensibly be a vault, before anything is changed.
+fn check_vault_dir(root: &Path) -> Res<()> {
+    let canon = fs::canonicalize(root).map_err(err)?;
+    let shown = root.display();
+    if canon.parent().is_none() {
+        return Err(format!(
+            "\"{shown}\" is a whole drive. Choose (or create) a folder that holds just your notes, e.g. {}Notes.",
+            root.to_string_lossy().trim_end_matches(['\\', '/']).to_string() + "\\"
+        ));
+    }
+    let system: Vec<PathBuf> = ["WINDIR", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData"]
+        .iter()
+        .filter_map(|v| std::env::var_os(v))
+        .filter_map(|p| fs::canonicalize(p).ok())
+        .collect();
+    if system.iter().any(|s| canon.starts_with(s)) {
+        return Err(format!("\"{shown}\" is a Windows system folder and can't be used for notes."));
+    }
+    let home = std::env::var_os("USERPROFILE").and_then(|p| fs::canonicalize(p).ok());
+    if home.as_deref() == Some(canon.as_path()) || canon.parent().and_then(Path::parent).is_none() && canon.ends_with("Users") {
+        return Err(format!(
+            "\"{shown}\" contains your whole user profile. Choose a folder inside it, e.g. Documents\\Notes."
+        ));
+    }
+    if !index::within_size(root, MAX_VAULT_ENTRIES) {
+        return Err(format!(
+            "\"{shown}\" has more than {MAX_VAULT_ENTRIES} files and folders, which is too many for a notes vault. \
+             Choose a folder that holds just your notes."
+        ));
+    }
+    Ok(())
+}
+
 fn load_vault(app: &AppHandle, state: &AppState, path: String) -> Res<VaultInfo> {
     let root = PathBuf::from(&path);
     if !root.is_dir() {
         return Err(format!("Folder not found: {path}"));
     }
+    check_vault_dir(&root)?;
     // Stop the old watcher first, without holding the vault lock (its callback takes that lock).
     let old = state.watcher.lock().map_err(err)?.take();
     drop(old);
@@ -452,4 +495,25 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Notes MD");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refuses_drives_and_system_folders() {
+        let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into()) + "\\";
+        let e = check_vault_dir(Path::new(&drive)).unwrap_err();
+        assert!(e.contains("whole drive"), "{e}");
+        let windir = std::env::var("WINDIR").unwrap();
+        assert!(check_vault_dir(&Path::new(&windir).join("System32")).unwrap_err().contains("system folder"));
+        let home = std::env::var("USERPROFILE").unwrap();
+        assert!(check_vault_dir(Path::new(&home)).unwrap_err().contains("user profile"));
+        let ok = std::env::temp_dir().join(format!("notesmd-vault-{}", std::process::id()));
+        fs::create_dir_all(ok.join("sub")).unwrap();
+        assert!(check_vault_dir(&ok).is_ok());
+        assert!(!index::within_size(&ok, 1)); // root + sub = 2 entries
+        let _ = fs::remove_dir_all(&ok);
+    }
 }

@@ -734,9 +734,9 @@ async function openVault(cmd: "pick_vault" | "open_last_vault") {
     }
     S.vault = info;
   } catch (e) {
-    S.vault = null;
-    el.vaultName.textContent = "Open vault…";
-    showEditor(false);
+    // A refused folder is rejected before anything changes, so the open vault stays usable.
+    el.vaultName.textContent = S.vault ? S.vault.name : "Open vault…";
+    if (!S.vault) showEditor(false);
     toast(String(e));
     return;
   }

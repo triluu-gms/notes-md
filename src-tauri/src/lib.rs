@@ -155,28 +155,55 @@ async fn pick_vault(app: AppHandle, state: State<'_, AppState>) -> Res<Option<Va
 /// system folder is far above it, and scanning one would freeze the app.
 const MAX_VAULT_ENTRIES: usize = 100_000;
 
+/// Operating-system folders that must never be a vault (they are huge and not notes).
+#[cfg(windows)]
+fn system_dirs() -> Vec<PathBuf> {
+    ["WINDIR", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData"]
+        .iter()
+        .filter_map(|v| std::env::var_os(v))
+        .filter_map(|p| fs::canonicalize(p).ok())
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn system_dirs() -> Vec<PathBuf> {
+    [
+        "/bin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64", "/proc", "/run", "/sbin", "/snap", "/sys",
+        "/usr", "/var", "/System", "/Library", "/Applications", "/private",
+    ]
+    .iter()
+    .filter_map(|p| fs::canonicalize(p).ok())
+    .collect()
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).and_then(|p| fs::canonicalize(p).ok())
+}
+
 /// Refuse folders that cannot sensibly be a vault, before anything is changed.
 fn check_vault_dir(root: &Path) -> Res<()> {
     let canon = fs::canonicalize(root).map_err(err)?;
     let shown = root.display();
     if canon.parent().is_none() {
+        let example = if cfg!(windows) {
+            format!("{}\\Notes", root.to_string_lossy().trim_end_matches(['\\', '/']))
+        } else {
+            "~/Notes".to_string()
+        };
         return Err(format!(
-            "\"{shown}\" is a whole drive. Choose (or create) a folder that holds just your notes, e.g. {}Notes.",
-            root.to_string_lossy().trim_end_matches(['\\', '/']).to_string() + "\\"
+            "\"{shown}\" is a whole drive. Choose (or create) a folder that holds just your notes, e.g. {example}."
         ));
     }
-    let system: Vec<PathBuf> = ["WINDIR", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData"]
-        .iter()
-        .filter_map(|v| std::env::var_os(v))
-        .filter_map(|p| fs::canonicalize(p).ok())
-        .collect();
-    if system.iter().any(|s| canon.starts_with(s)) {
-        return Err(format!("\"{shown}\" is a Windows system folder and can't be used for notes."));
+    if system_dirs().iter().any(|s| canon.starts_with(s)) {
+        return Err(format!("\"{shown}\" is a system folder and can't be used for notes."));
     }
-    let home = std::env::var_os("USERPROFILE").and_then(|p| fs::canonicalize(p).ok());
-    if home.as_deref() == Some(canon.as_path()) || canon.parent().and_then(Path::parent).is_none() && canon.ends_with("Users") {
+    // The home folder itself, or the folder holding every user's home (C:\Users, /home).
+    let home = home_dir();
+    let homes = home.as_deref().and_then(Path::parent);
+    if home.as_deref() == Some(canon.as_path()) || homes == Some(canon.as_path()) {
+        let example = if cfg!(windows) { "Documents\\Notes" } else { "~/Notes" };
         return Err(format!(
-            "\"{shown}\" contains your whole user profile. Choose a folder inside it, e.g. Documents\\Notes."
+            "\"{shown}\" contains your whole user profile. Choose a folder inside it, e.g. {example}."
         ));
     }
     if !index::within_size(root, MAX_VAULT_ENTRIES) {
@@ -503,13 +530,18 @@ mod tests {
 
     #[test]
     fn refuses_drives_and_system_folders() {
-        let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into()) + "\\";
+        let (drive, system) = if cfg!(windows) {
+            let windir = PathBuf::from(std::env::var("WINDIR").unwrap());
+            (std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into()) + "\\", windir.join("System32"))
+        } else {
+            ("/".to_string(), PathBuf::from("/usr/bin"))
+        };
         let e = check_vault_dir(Path::new(&drive)).unwrap_err();
         assert!(e.contains("whole drive"), "{e}");
-        let windir = std::env::var("WINDIR").unwrap();
-        assert!(check_vault_dir(&Path::new(&windir).join("System32")).unwrap_err().contains("system folder"));
-        let home = std::env::var("USERPROFILE").unwrap();
-        assert!(check_vault_dir(Path::new(&home)).unwrap_err().contains("user profile"));
+        assert!(check_vault_dir(&system).unwrap_err().contains("system folder"));
+        let home = home_dir().unwrap();
+        assert!(check_vault_dir(&home).unwrap_err().contains("user profile"));
+        assert!(check_vault_dir(home.parent().unwrap()).unwrap_err().contains("user profile"));
         let ok = std::env::temp_dir().join(format!("notesmd-vault-{}", std::process::id()));
         fs::create_dir_all(ok.join("sub")).unwrap();
         assert!(check_vault_dir(&ok).is_ok());

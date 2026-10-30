@@ -62,9 +62,38 @@ The SQLite index lives in `%APPDATA%\com.notesmd.app\index-<hash>.db`, never ins
 cache: on open and on every file-system change, files whose size/mtime changed are re-parsed. Delete it any time
 to force a full rebuild.
 
+## Download & run
+
+Installers are published on the GitHub **Releases** page:
+
+| Platform | File | Notes |
+| --- | --- | --- |
+| Windows 10/11 x64 | `Notes MD_x.y.z_x64-setup.exe` | Needs WebView2 (built into Windows 11; the installer fetches it if missing). |
+| Debian / Ubuntu | `Notes MD_x.y.z_amd64.deb` | `sudo apt install ./Notes*.deb` — pulls in WebKitGTK. |
+| Fedora / RHEL / openSUSE | `Notes MD-x.y.z-1.x86_64.rpm` | `sudo dnf install ./Notes*.rpm` |
+| Any Linux x64 | `Notes MD_x.y.z_amd64.AppImage` | `chmod +x` and run; no install. |
+
+Linux needs a distro with WebKitGTK 4.1 (Ubuntu 22.04+, Debian 12+, Fedora 38+). If the window stays blank on
+some NVIDIA/Wayland setups, start it with `WEBKIT_DISABLE_DMABUF_RENDERER=1`. Very large vaults may need a
+higher `fs.inotify.max_user_watches` for file watching.
+
+## Releasing
+
+[`.github/workflows/release.yml`](.github/workflows/release.yml) builds Windows and Linux on GitHub Actions.
+
+```powershell
+git tag v0.2.0
+git push notes-md v0.2.0     # builds both platforms and publishes "Notes MD v0.2.0" with all installers
+```
+
+The version is taken from the tag (no need to edit `tauri.conf.json`). To test the build without publishing,
+run the workflow manually from the **Actions** tab; the files appear as artifacts on the run page.
+
 ## Development
 
-Prerequisites: Node 18+, Rust (via `rustup`), MSVC C++ Build Tools, WebView2 (preinstalled on Windows 10/11).
+Prerequisites: Node 20+, Rust (via `rustup`), and
+- Windows: MSVC C++ Build Tools, WebView2 (preinstalled on Windows 10/11);
+- Linux: `sudo apt install libwebkit2gtk-4.1-dev libxdo-dev libssl-dev librsvg2-dev build-essential file`.
 
 ```powershell
 npm install

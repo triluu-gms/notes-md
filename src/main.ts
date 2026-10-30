@@ -107,7 +107,12 @@ function joinRel(base: string, rel: string): string | null {
   return out.join("/");
 }
 
-const absPath = (rel: string) => S.vault!.root.replace(/[\\/]+$/, "") + "\\" + rel.replace(/\//g, "\\");
+/** Absolute path of a vault file, with the OS's separator (taken from the vault path: `\` on Windows). */
+const absPath = (rel: string) => {
+  const root = S.vault!.root.replace(/[\\/]+$/, "");
+  const sep = root.includes("\\") ? "\\" : "/";
+  return root + sep + rel.split("/").join(sep);
+};
 
 function fmtDate(ms: number) {
   const d = new Date(ms);

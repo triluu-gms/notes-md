@@ -165,6 +165,38 @@ fn split_name(name: &str, fallback: &str) -> (String, String) {
     }
 }
 
+/// Usual file extension for a MIME type ("" if unknown).
+fn ext_for_mime(mime: &str) -> &str {
+    match mime.trim().to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" | "image/pjpeg" => "jpg",
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        "image/bmp" => "bmp",
+        "image/tiff" => "tiff",
+        "image/x-icon" | "image/vnd.microsoft.icon" => "ico",
+        "image/heic" => "heic",
+        "image/avif" => "avif",
+        "application/pdf" => "pdf",
+        "application/zip" => "zip",
+        "text/plain" => "txt",
+        "text/html" => "html",
+        "text/markdown" => "md",
+        "audio/mpeg" => "mp3",
+        "audio/wav" | "audio/x-wav" => "wav",
+        "video/mp4" => "mp4",
+        "video/webm" => "webm",
+        "application/msword" => "doc",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.ms-excel" => "xls",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        "application/vnd.ms-powerpoint" => "ppt",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+        _ => "",
+    }
+}
+
 /// Relative link from a note in `from_dir` to vault path `to`, URL-encoded for Markdown.
 fn rel_link(from_dir: &str, to: &str) -> String {
     let from: Vec<&str> = from_dir.split('/').filter(|s| !s.is_empty()).collect();
@@ -253,7 +285,10 @@ fn evernote_note(w: &mut Writer, note: &xml::Elem, dir: &str, res_dir: &str) -> 
             .and_then(|a| a.child("file-name"))
             .map(|f| f.text())
             .filter(|f| !f.trim().is_empty())
-            .unwrap_or_else(|| format!("attachment.{}", mime.rsplit('/').next().unwrap_or("bin")));
+            .unwrap_or_else(|| {
+                let ext = Some(ext_for_mime(&mime)).filter(|e| !e.is_empty());
+                format!("attachment.{}", ext.unwrap_or_else(|| mime.rsplit('/').next().unwrap_or("bin")))
+            });
         let (stem, ext) = split_name(&file_name, "attachment");
         let rel = w.alloc(res_dir, &stem, &ext);
         w.write(&rel, &bytes, None)?;
@@ -339,6 +374,7 @@ fn parse_jitem(src: &str) -> Option<JItem> {
 pub fn joplin(root: &Path, folder: &str, file: &Path) -> Result<Report, String> {
     let open = || fs::File::open(file).map_err(|e| format!("{}: {e}", file.display()));
     let mut items = Vec::new();
+    let mut blob_ext: HashMap<String, String> = HashMap::new(); // resource id -> extension of its file
     let mut archive = tar::Archive::new(open()?);
     for entry in archive.entries().map_err(|e| e.to_string())? {
         let mut entry = entry.map_err(|e| e.to_string())?;
@@ -347,6 +383,10 @@ pub fn joplin(root: &Path, folder: &str, file: &Path) -> Result<Report, String> 
             let mut s = String::new();
             if io::Read::read_to_string(&mut entry, &mut s).is_ok() {
                 items.extend(parse_jitem(&s));
+            }
+        } else if let Some(name) = path.strip_prefix("resources/") {
+            if let Some((id, ext)) = name.split_once('.') {
+                blob_ext.insert(id.to_string(), ext.to_string());
             }
         }
     }
@@ -401,13 +441,15 @@ pub fn joplin(root: &Path, folder: &str, file: &Path) -> Result<Report, String> 
     let res_dir = join(folder, RESOURCES);
     let mut resources: HashMap<String, String> = HashMap::new(); // resource id -> vault path
     for r in by_kind(4) {
-        let ext = r.prop("file_extension");
-        let mut name = if r.title.is_empty() { r.prop("id").to_string() } else { r.title.clone() };
-        if !ext.is_empty() && !name.to_lowercase().ends_with(&format!(".{}", ext.to_lowercase())) {
-            name = format!("{name}.{ext}");
-        }
-        let (stem, ext) = split_name(&name, "attachment");
-        let rel = w.alloc(&res_dir, &stem, &ext);
+        // Named `<resource id>.<ext>` like Joplin's own files (titles are often just "Attachment"), so
+        // each file stays traceable to its Joplin resource. `file_extension` is often empty: fall back
+        // to the archive file's extension, then the MIME type.
+        let id = r.prop("id");
+        let ext = [r.prop("file_extension"), blob_ext.get(id).map_or("", String::as_str), ext_for_mime(r.prop("mime"))]
+            .into_iter()
+            .find(|e| !e.is_empty())
+            .map_or(String::new(), |e| format!(".{}", safe_name(e, "bin")));
+        let rel = w.alloc(&res_dir, &safe_name(id, "attachment"), &ext);
         targets.insert(r.prop("id").to_string(), rel.clone());
         resources.insert(r.prop("id").to_string(), rel);
     }
@@ -510,13 +552,15 @@ mod tests {
         let root = std::env::temp_dir().join(format!("notesmd-jex-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
-        let (f1, f2, n1, n2, r1, t1) = (
+        let (f1, f2, n1, n2, r1, t1, r2, r3) = (
             "f1000000000000000000000000000001",
             "f2000000000000000000000000000002",
             "a1000000000000000000000000000001",
             "a2000000000000000000000000000002",
             "c1000000000000000000000000000001",
             "e1000000000000000000000000000001",
+            "c2000000000000000000000000000002",
+            "c3000000000000000000000000000003",
         );
         let items = [
             format!("Oracle\n\nid: {f1}\nparent_id: \ntype_: 2"),
@@ -526,10 +570,13 @@ mod tests {
                  created_time: 2012-12-13T03:07:08.000Z\nupdated_time: 2024-08-04T04:21:46.036Z\n\
                  user_updated_time: 2020-01-02T03:04:05.000Z\nsource_url: http://x.com\nis_conflict: 0\nmarkup_language: 1\ntype_: 1"
             ),
-            format!("Other note\n\n<p>Hello <b>html</b></p>\n\nid: {n2}\nparent_id: {f1}\nmarkup_language: 2\ntype_: 1"),
+            format!("Other note\n\n<p>Hello <b>html</b></p><p><img src=\":/{r2}\" alt=\"pic\"/></p>\n\nid: {n2}\nparent_id: {f1}\nmarkup_language: 2\ntype_: 1"),
             format!("rac\n\nid: {t1}\ntype_: 5"),
             format!("id: x1\nnote_id: {n1}\ntag_id: {t1}\ntype_: 6"),
             format!("crs diagram.png\n\nid: {r1}\nmime: image/png\nfile_extension: png\ntype_: 4"),
+            // Pasted images: generic title and empty file_extension; the type comes from the archive or MIME.
+            format!("Attachment\n\nid: {r2}\nmime: image/jpeg\nfile_extension: \ntype_: 4"),
+            format!("Attachment\n\nid: {r3}\nmime: image/webp\nfile_extension: \ntype_: 4"),
         ];
         let jex = root.join("export.jex");
         {
@@ -545,20 +592,24 @@ mod tests {
                 add(&format!("item{i}.md"), item.as_bytes());
             }
             add(&format!("resources/{r1}.png"), b"PNGDATA");
+            add(&format!("resources/{r2}.jpg"), b"JPGDATA");
+            add(&format!("resources/{r3}"), b"WEBPDATA");
             b.finish().unwrap();
         }
         let rep = joplin(&root, "Imported", &jex).unwrap();
-        assert_eq!((rep.notes, rep.notebooks, rep.attachments, rep.tags), (2, 2, 1, 1));
+        assert_eq!((rep.notes, rep.notebooks, rep.attachments, rep.tags), (2, 2, 3, 1));
         let note = fs::read_to_string(root.join("Imported/Oracle/RAC/Start CRS.md")).unwrap();
         assert_eq!(
             note,
             "---\ntitle: \"Start CRS\"\ncreated: 2012-12-13T03:07:08Z\nupdated: 2020-01-02T03:04:05Z\n\
              source: \"http://x.com\"\ntags: [rac]\n---\n\nRun this:\n\n\
-             ![diagram](../../_resources/crs%20diagram.png)\n\nSee [other](../Other%20note.md)"
+             ![diagram](../../_resources/c1000000000000000000000000000001.png)\n\nSee [other](../Other%20note.md)"
         );
         let other = fs::read_to_string(root.join("Imported/Oracle/Other note.md")).unwrap();
-        assert!(other.ends_with("---\n\nHello **html**\n"), "{other}");
-        assert_eq!(fs::read(root.join("Imported/_resources/crs diagram.png")).unwrap(), b"PNGDATA");
+        assert!(other.ends_with("---\n\nHello **html**\n\n![pic](../_resources/c2000000000000000000000000000002.jpg)\n"), "{other}");
+        assert_eq!(fs::read(root.join("Imported/_resources/c1000000000000000000000000000001.png")).unwrap(), b"PNGDATA");
+        assert_eq!(fs::read(root.join("Imported/_resources/c2000000000000000000000000000002.jpg")).unwrap(), b"JPGDATA");
+        assert_eq!(fs::read(root.join("Imported/_resources/c3000000000000000000000000000003.webp")).unwrap(), b"WEBPDATA");
         let modified = fs::metadata(root.join("Imported/Oracle/RAC/Start CRS.md")).unwrap().modified().unwrap();
         assert_eq!(modified, parse_time("2020-01-02T03:04:05Z").unwrap().1);
         let _ = fs::remove_dir_all(&root);
@@ -596,3 +647,4 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 }
+

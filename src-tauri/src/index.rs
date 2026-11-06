@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL) 
 ";
 
 /// Bump whenever parse.rs changes what it extracts, to force a full re-index.
-const INDEX_VERSION: i64 = 3;
+const INDEX_VERSION: i64 = 4;
 
 /// Separator used by group_concat for tag lists (cannot appear in a tag).
 const SEP: char = '\u{1f}';

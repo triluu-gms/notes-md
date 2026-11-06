@@ -34,6 +34,10 @@ Built with [Tauri 2](https://tauri.app) (Rust + WebView2): ~5–10 MB installer,
   relative links and images.
 - **File watching**: changes made by other apps (VS Code, Obsidian, git, sync tools) show up automatically.
 - **Light / dark theme** following Windows, or forced from the sidebar toggle.
+- **File names follow titles.** A note still named `Untitled…` (or named exactly like its title) is renamed
+  to its title when saved: the front-matter `title:`, else the first `# Heading`, else the first line of text.
+  Names you chose yourself are never changed. For existing notes: `⋯` next to the vault name (or right-click a
+  folder) → *Rename untitled notes to their titles*.
 - Drag notes or folders onto a folder to move them; right-click for New / Rename / Delete (Recycle Bin) /
   Show in Explorer.
 

@@ -22,6 +22,9 @@ pub fn parse<'a>(stem: &str, content: &'a str, inline: bool) -> Parsed<'a> {
         parse_front_matter(fm, &mut title, &mut tags);
     }
 
+    // "Untitled Note" from an import or a new note is no title at all.
+    title = title.filter(|t| !is_placeholder(t));
+
     let mut code = CodeTracker::default();
     for line in body.lines() {
         if code.skip(line) {
@@ -30,7 +33,7 @@ pub fn parse<'a>(stem: &str, content: &'a str, inline: bool) -> Parsed<'a> {
         if title.is_none() {
             if let Some(h) = line.trim_start().strip_prefix("# ") {
                 let h = h.trim();
-                if !h.is_empty() {
+                if !h.is_empty() && !is_placeholder(h) {
                     title = Some(h.to_string());
                 }
             }
@@ -42,7 +45,102 @@ pub fn parse<'a>(stem: &str, content: &'a str, inline: bool) -> Parsed<'a> {
 
     tags.sort();
     tags.dedup();
-    Parsed { title: title.unwrap_or_else(|| stem.to_string()), tags, body }
+    // A real file name beats guessing; only untitled files take their title from the text.
+    let title = title
+        .or_else(|| Some(stem.to_string()).filter(|s| !is_placeholder(s)))
+        .or_else(|| title_from_text(body))
+        .unwrap_or_else(|| stem.to_string());
+    Parsed { title, tags, body }
+}
+
+/// "Untitled", "Untitled1", "Untitled Note (3)", "New note 2", "": names that say nothing.
+pub fn is_placeholder(name: &str) -> bool {
+    let mut s = name.trim().to_lowercase();
+    if s.ends_with(')') {
+        if let Some(i) = s.rfind('(') {
+            if s[i + 1..s.len() - 1].chars().all(|c| c.is_ascii_digit()) {
+                s.truncate(i);
+            }
+        }
+    }
+    if s.trim().is_empty() {
+        return true;
+    }
+    let s = s.trim_end_matches(|c: char| c.is_ascii_digit() || c.is_whitespace());
+    matches!(s, "untitled" | "untitled note" | "new note")
+}
+
+/// The first line with words (heading or text), as plain text: a title for a note that has none.
+pub fn title_from_text(body: &str) -> Option<String> {
+    let mut code = CodeTracker::default();
+    body.lines()
+        .filter(|l| !code.skip(l))
+        .map(|l| plain_text(l.trim()).trim_matches(['-', '=', ':', ';', ',', ' ']).to_string())
+        .find(|t| t.chars().any(char::is_alphanumeric) && !is_placeholder(t))
+        .map(|t| shorten(&t))
+}
+
+/// Markdown/HTML line -> its visible text: no markers, emphasis, link targets, images or tags.
+fn plain_text(line: &str) -> String {
+    let mut s = line.trim_start_matches(['#', '>', ' ', '\t']);
+    for marker in ["- [ ] ", "- [x] ", "- ", "* ", "+ "] {
+        s = s.strip_prefix(marker).unwrap_or(s);
+    }
+    if let Some((num, rest)) = s.split_once(". ") {
+        if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
+            s = rest;
+        }
+    }
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(c) = rest.chars().next() {
+        if rest.starts_with("![") {
+            // Image: drop it entirely.
+            rest = skip_link(&rest[1..]).unwrap_or(&rest[2..]);
+        } else if c == '[' {
+            // Link: keep the text, drop the target.
+            match rest.find("](").zip(skip_link(rest)) {
+                Some((close, after)) => {
+                    out.push_str(&plain_text(&rest[1..close]));
+                    rest = after;
+                }
+                None => {
+                    out.push(c);
+                    rest = &rest[1..];
+                }
+            }
+        } else if c == '<' && rest.find('>').is_some() {
+            rest = &rest[rest.find('>').unwrap() + 1..];
+        } else if c == '|' {
+            out.push(' ');
+            rest = &rest[1..];
+        } else {
+            if !matches!(c, '*' | '_' | '`' | '~') {
+                out.push(c);
+            }
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `[text](target)rest` -> `rest`.
+fn skip_link(s: &str) -> Option<&str> {
+    let close = s.find("](")?;
+    let end = s[close..].find(')')?;
+    Some(&s[close + end + 1..])
+}
+
+/// At most ~80 characters, cut at a word boundary.
+fn shorten(s: &str) -> String {
+    if s.chars().count() <= 80 {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(80).collect();
+    match cut.rfind(' ') {
+        Some(i) if i > 40 => cut[..i].to_string(),
+        _ => cut,
+    }
 }
 
 /// Byte range of the front matter's inner text; the closing `---` line starts at the range end.
@@ -421,6 +519,24 @@ mod tests {
         assert_eq!(p.title, "Hello");
         assert_eq!(p.tags, vec!["ideas/app", "todo", "work"]);
         assert!(p.body.starts_with("# Heading"));
+    }
+
+    #[test]
+    fn placeholder_titles() {
+        for s in ["Untitled", "untitled1", "Untitled 2", "Untitled Note (3)", "Untitled Note 8", "New note", " "] {
+            assert!(is_placeholder(s), "{s}");
+        }
+        for s in ["Untitled thoughts", "Notes", "2024", "RAC setup (2)"] {
+            assert!(!is_placeholder(s), "{s}");
+        }
+        // Placeholder front-matter title: the first line of text wins; a real file name wins over it.
+        let src = "---\ntitle: \"Untitled Note\"\ntags: [asm]\n---\n\n**SCAN LISTENER not [registered](http://x)** after failover.\n## Attachments\n";
+        assert_eq!(parse("Untitled Note (4)", src, true).title, "SCAN LISTENER not registered after failover.");
+        assert_eq!(parse("Scan listener", src, true).title, "Scan listener");
+        assert_eq!(parse("Untitled 1", "# Untitled 1\n\n", true).title, "Untitled 1");
+        assert_eq!(parse("Untitled", "![img](a.png)\n\n```\ncode\n```\n> - [ ] Buy milk\n", true).title, "Buy milk");
+        let long = "word ".repeat(30);
+        assert!(title_from_text(&long).unwrap().len() <= 80);
     }
 
     #[test]

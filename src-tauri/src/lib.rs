@@ -382,16 +382,85 @@ fn read_note(state: State<AppState>, path: String) -> Res<String> {
     })
 }
 
+/// Saves a note and returns its path, which changes when the file name follows the title.
 #[tauri::command]
-fn save_note(state: State<AppState>, path: String, content: String) -> Res<()> {
+fn save_note(state: State<AppState>, path: String, content: String) -> Res<String> {
     with_vault(&state, |v| {
         let full = resolve(&v.root, &path)?;
         if let Some(dir) = full.parent() {
             fs::create_dir_all(dir).map_err(err)?;
         }
-        fs::write(&full, content).map_err(err)?;
-        v.index.update_file(&v.root, &path).map_err(err)
+        let old = fs::read(&full).ok().map(|b| String::from_utf8_lossy(&b).into_owned());
+        fs::write(&full, &content).map_err(err)?;
+        let Some(name) = old.and_then(|old| title_file_name(&full, &old, &content)) else {
+            v.index.update_file(&v.root, &path).map_err(err)?;
+            return Ok(path);
+        };
+        let rel = join_rel(path.rsplit_once('/').map_or("", |(p, _)| p), &name);
+        if fs::rename(&full, resolve(&v.root, &rel)?).is_err() {
+            // Name in use by another app, etc.: keep the old name rather than fail the save.
+            v.index.update_file(&v.root, &path).map_err(err)?;
+            return Ok(path);
+        }
+        sync(v)?;
+        Ok(rel)
     })
+}
+
+/// New file name when a save changes the title of a note whose name follows its title: a name like
+/// "Untitled 2" or one equal to the previous title. Names the user chose themselves are kept.
+fn title_file_name(full: &Path, old: &str, new: &str) -> Option<String> {
+    let stem = full.file_stem()?.to_str()?;
+    // Parse with no file name so the title comes from the text only, never from the current name.
+    let title = |content: &str| {
+        let t = parse::parse("", content, false).title;
+        Some(import::safe_name(&t, "")).filter(|t| !t.is_empty() && !parse::is_placeholder(t))
+    };
+    let base = strip_counter(stem);
+    let follows = parse::is_placeholder(stem) || title(old).is_some_and(|t| t == base);
+    let want = title(new).filter(|t| follows && *t != base)?;
+    let dir = full.parent()?;
+    let current = full.file_name()?.to_string_lossy().to_lowercase();
+    (0..1000)
+        .map(|n| if n == 0 { format!("{want}.md") } else { format!("{want} ({n}).md") })
+        .find(|f| f.to_lowercase() == current || !dir.join(f).exists())
+        .filter(|f| *f != full.file_name().unwrap_or_default().to_string_lossy())
+}
+
+/// Renames the notes in `folder` (recursively) still named "Untitled…" after their titles; returns
+/// the (old, new) paths.
+#[tauri::command]
+fn rename_untitled(state: State<AppState>, folder: String) -> Res<Vec<(String, String)>> {
+    with_vault(&state, |v| {
+        let notes = v.index.list(Some(&folder), None).map_err(err)?;
+        let mut renamed = Vec::new();
+        for n in notes {
+            let full = resolve(&v.root, &n.path)?;
+            if !full.file_stem().and_then(|s| s.to_str()).is_some_and(parse::is_placeholder) {
+                continue;
+            }
+            let Ok(bytes) = fs::read(&full) else { continue };
+            let content = String::from_utf8_lossy(&bytes);
+            if let Some(name) = title_file_name(&full, &content, &content) {
+                if fs::rename(&full, full.with_file_name(&name)).is_ok() {
+                    let rel = join_rel(n.path.rsplit_once('/').map_or("", |(p, _)| p), &name);
+                    renamed.push((n.path, rel));
+                }
+            }
+        }
+        if !renamed.is_empty() {
+            sync(v)?;
+        }
+        Ok(renamed)
+    })
+}
+
+/// "Name (2)" -> "Name": the suffix added when the title's file name was taken.
+fn strip_counter(stem: &str) -> &str {
+    stem.strip_suffix(')')
+        .and_then(|s| s.rsplit_once(" ("))
+        .filter(|(_, n)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+        .map_or(stem, |(base, _)| base)
 }
 
 #[tauri::command]
@@ -516,6 +585,7 @@ pub fn run() {
             create_note,
             create_folder,
             rename_item,
+            rename_untitled,
             move_item,
             delete_item,
             reveal,
@@ -527,6 +597,31 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_name_follows_title() {
+        let dir = std::env::temp_dir().join(format!("notesmd-title-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let name = |file: &str, old: &str, new: &str| title_file_name(&dir.join(file), old, new);
+        // Untitled notes take the title, including while it is being typed.
+        assert_eq!(name("Untitled 1.md", "# Untitled 1\n", "# M\n").as_deref(), Some("M.md"));
+        assert_eq!(name("M.md", "# M\n", "# My note\n").as_deref(), Some("My note.md"));
+        assert_eq!(name("Untitled.md", "", "Plain *first* line\nmore").as_deref(), Some("Plain first line.md"));
+        // Same title, untitled text, or a name the user chose: no rename.
+        assert_eq!(name("My note.md", "# My note\nA", "# My note\nB"), None);
+        assert_eq!(name("Untitled.md", "", "# Untitled\n"), None);
+        assert_eq!(name("Meeting.md", "Attendees: A, B\n", "# Agenda\nAttendees: A, B\n"), None);
+        assert_eq!(name("Meeting.md", "# Agenda\n", "# Plan\n"), None);
+        // Taken names get a counter; "Name (1)" still follows its title.
+        fs::write(dir.join("Taken.md"), "").unwrap();
+        assert_eq!(name("Untitled.md", "", "# Taken\n").as_deref(), Some("Taken (1).md"));
+        assert_eq!(name("Taken (1).md", "# Taken\n", "# Taken\nmore").as_deref(), None);
+        assert_eq!(name("Taken (1).md", "# Taken\n", "# Other\n").as_deref(), Some("Other.md"));
+        // Characters Windows refuses in file names are replaced.
+        assert_eq!(name("Untitled.md", "", "# A/B: C?\n").as_deref(), Some("A-B- C-.md"));
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn refuses_drives_and_system_folders() {

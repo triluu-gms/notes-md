@@ -479,9 +479,24 @@ const importItems = (folder: string): [string, () => void][] => [
 $("vault-menu-btn").addEventListener("click", (e) => {
   const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
   const items: MenuItem[] = [["Open vault folder…", pickVault]];
-  if (S.vault) items.push("-", ...importItems(currentFolder()));
+  if (S.vault)
+    items.push(
+      "-",
+      ...importItems(currentFolder()),
+      "-",
+      ["Rename untitled notes to their titles", () => renameUntitled("")],
+    );
   showMenu(r.left, r.bottom + 4, items);
 });
+
+/** Give notes still called "Untitled…" (in `folder`, recursively) the file name of their title. */
+async function renameUntitled(folder: string) {
+  await save();
+  const renamed = await call<[string, string][]>("rename_untitled", { folder });
+  for (const [from, to] of renamed) remapPath(from, to);
+  await refresh();
+  toast(renamed.length ? `Renamed ${renamed.length} note${renamed.length === 1 ? "" : "s"} to their titles` : "No untitled notes to rename");
+}
 
 async function importNotes(kind: ImportKind, folder: string) {
   if (!S.vault) return;
@@ -584,14 +599,23 @@ el.modeSeg.onclick = (e) => {
 };
 
 // ---------- notes ----------
-async function save() {
+// Saves run one at a time: a save can rename the file, and the next one must use the new path.
+let saving: Promise<void> = Promise.resolve();
+function save(): Promise<void> {
+  saving = saving.then(saveNow);
+  return saving;
+}
+
+async function saveNow() {
   if (!S.current || !S.dirty) return;
   const path = S.current;
   const content = view.state.doc.toString();
   setSaveState("Saving…");
   try {
-    await invoke("save_note", { path, content });
-    if (S.current === path) {
+    // The file is renamed when its name follows the title and the title changed.
+    const saved = await invoke<string>("save_note", { path, content });
+    if (saved !== path) remapPath(path, saved);
+    if (S.current === saved) {
       S.saved = content;
       S.dirty = view.state.doc.toString() !== content;
       setSaveState(S.dirty ? "Edited" : "Saved");
@@ -1027,6 +1051,8 @@ document.addEventListener("contextmenu", (e) => {
       ["New folder", () => newFolder(p)],
       "-",
       ...importItems(p).map(([label, fn]): MenuItem => [label.replace("…", " here…"), fn]),
+      "-",
+      ["Rename untitled notes to their titles", () => renameUntitled(p)],
     ];
     if (!folderItem.dataset.all)
       items.push("-", ["Rename…", () => renameItem(p, true)], ["Delete", () => deleteItem(p, true)]);

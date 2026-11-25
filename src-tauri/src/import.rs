@@ -136,7 +136,7 @@ fn yaml_str(s: &str) -> String {
 }
 
 /// A file/folder name that is valid on Windows.
-fn safe_name(s: &str, fallback: &str) -> String {
+pub(crate) fn safe_name(s: &str, fallback: &str) -> String {
     let cleaned: String =
         s.chars().map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { '-' } else { c }).collect();
     let mut t: String = cleaned.trim().chars().take(120).collect();
@@ -258,8 +258,8 @@ fn evernote_note(w: &mut Writer, note: &xml::Elem, dir: &str, res_dir: &str) -> 
     let text = |name: &str| note.child(name).map(|e| e.text().trim().to_string()).filter(|s| !s.is_empty());
     let attrs = note.child("note-attributes");
     let attr = |name: &str| attrs.and_then(|a| a.child(name)).map(|e| e.text().trim().to_string());
-    let meta = NoteMeta {
-        title: text("title").unwrap_or_else(|| "Untitled".into()),
+    let mut meta = NoteMeta {
+        title: text("title").unwrap_or_default(),
         created: text("created").and_then(|s| parse_time(&s)),
         updated: text("updated").and_then(|s| parse_time(&s)),
         source: attr("source-url"),
@@ -323,8 +323,17 @@ fn evernote_note(w: &mut Writer, note: &xml::Elem, dir: &str, res_dir: &str) -> 
         }
     }
 
+    meta.title = real_title(&meta.title, &body);
     let rel = w.alloc(dir, &safe_name(&meta.title, "Untitled"), ".md");
     w.note(&rel, &meta, &body)
+}
+
+/// The note's title, or one taken from its text when it is only "Untitled Note" or empty.
+fn real_title(title: &str, body: &str) -> String {
+    if !parse::is_placeholder(title) {
+        return title.trim().to_string();
+    }
+    parse::title_from_text(body).unwrap_or_else(|| if title.trim().is_empty() { "Untitled" } else { title.trim() }.into())
 }
 
 // ---------------------------------------------------------------- Joplin
@@ -431,12 +440,19 @@ pub fn joplin(root: &Path, folder: &str, file: &Path) -> Result<Report, String> 
         .filter(|n| n.prop("is_conflict") != "1" && n.prop("deleted_time").parse::<i64>().unwrap_or(0) == 0)
         .collect();
     let mut targets: HashMap<String, String> = HashMap::new(); // Joplin id -> vault path
-    let mut note_paths = Vec::new();
+    let mut planned = Vec::new(); // (folder, file, title, Markdown body)
     for n in &notes {
+        let body = if n.prop("markup_language") == "2" {
+            let dom = xml::parse(&n.body);
+            html2md::convert(dom.find("body").unwrap_or(&dom), &|_| None)
+        } else {
+            n.body.clone()
+        };
+        let title = real_title(&n.title, &body);
         let dir = folder_paths.get(n.prop("parent_id")).cloned().unwrap_or_else(|| folder.to_string());
-        let rel = w.alloc(&dir, &safe_name(&n.title, "Untitled"), ".md");
+        let rel = w.alloc(&dir, &safe_name(&title, "Untitled"), ".md");
         targets.insert(n.prop("id").to_string(), rel.clone());
-        note_paths.push((dir, rel));
+        planned.push((dir, rel, title, body));
     }
     let res_dir = join(folder, RESOURCES);
     let mut resources: HashMap<String, String> = HashMap::new(); // resource id -> vault path
@@ -473,17 +489,11 @@ pub fn joplin(root: &Path, folder: &str, file: &Path) -> Result<Report, String> 
         }
     }
 
-    for (n, (dir, rel)) in notes.iter().zip(note_paths) {
-        let body = if n.prop("markup_language") == "2" {
-            let dom = xml::parse(&n.body);
-            html2md::convert(dom.find("body").unwrap_or(&dom), &|_| None)
-        } else {
-            n.body.clone()
-        };
+    for (n, (dir, rel, title, body)) in notes.iter().zip(planned) {
         let body = rewrite_joplin_links(&body, &dir, &targets);
         let time = |k: &str| Some(n.prop(k)).filter(|s| !s.is_empty()).and_then(parse_time);
         let meta = NoteMeta {
-            title: n.title.clone(),
+            title,
             created: time("user_created_time").or_else(|| time("created_time")),
             updated: time("user_updated_time").or_else(|| time("updated_time")),
             source: Some(n.prop("source_url").to_string()),
